@@ -4,7 +4,7 @@ gpu_num=8
 
 
 data=wiki
-tag=pre_cor_v5_shorformer_Layer16_stage1
+tag=pre_cor_v5_shorformer_Layer16_stage1_v2
 
 if [ $data == "wiki" ]; then
         arch=numerical_transformer_v5_lm_wiki103
@@ -16,7 +16,7 @@ if [ $data == "wiki" ]; then
         keep_last_epochs=200
         criterion=adaptive_loss
         max_epoch=
-        max_update=286000
+        max_update=140100
         data_dir=wikitext-103
         fp16=1
 elif [ $data == "ptb" ]; then
@@ -49,7 +49,10 @@ cp ./stage1.sh $save_dir/train_lm.sh
 
 
 if [ $data == "wiki" ]; then
-    cmd="python -u train.py data-bin/wikitext-103
+    cmd="python -m torch.distributed.launch --nproc_per_node=8
+        --nnodes=4 --node_rank=0 --master_addr="172.16.1.117"
+	--master_port=20202
+        train.py data-bin/wikitext-103
         --task language_modeling          
         --save-dir $save_dir     
         --arch $arch
@@ -114,12 +117,6 @@ fi
 
 if [ $fp16 -eq 1 ]; then
 cmd=${cmd}" --fp16 "
-fi
-if [ -n "$max_epoch" ]; then
-cmd=${cmd}" --max-epoch "${max_epoch}
-fi
-if [ -n "$max_update" ]; then
-cmd=${cmd}" --max-update "${max_update}
 fi
 
 export CUDA_VISIBLE_DEVICES=$device
