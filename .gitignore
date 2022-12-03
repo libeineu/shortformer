@@ -119,6 +119,7 @@ data-bin/
 
 # reranking
 /examples/reranking/rerank_data
+/examples
 
 # Cython-generated C++ source files
 /fairseq/data/data_utils_fast.cpp
