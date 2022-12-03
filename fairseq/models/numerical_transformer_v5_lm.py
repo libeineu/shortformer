@@ -350,7 +350,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
 
         self.calculate_num = args.dec_calculate_num
-        self.enc_learnable_type = getattr(args, 'enc_learnable_type', 'ema')
+        self.enc_learnable_type = getattr(args, 'dec_learnable_type', 'ema')
         self.alpha_type = getattr(args, 'alpha_type', 'scalar')
         self.layer_wise = getattr(args, 'layer_wise', False)
 
@@ -520,6 +520,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
+
+        self.history.add(x)
 
         self_attn_padding_mask: Optional[Tensor] = None
         if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
@@ -850,7 +852,7 @@ def numerical_transformer_v5_lm_big(args):
 @register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_wiki103')
 @register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_baevski_wiki103')
 def numerical_transformer_v5_lm_baevski_wiki103(args):
-    args.decoder_layers = getattr(args, 'decoder_layers', 16)
+    args.decoder_layers = getattr(args, 'decoder_layers', 8)
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
     args.dropout = getattr(args, 'dropout', 0.3)
     args.adaptive_input = getattr(args, 'adaptive_input', True)
