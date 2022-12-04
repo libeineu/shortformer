@@ -543,6 +543,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             need_attn=bool((idx == alignment_layer)),
             need_head_weights=bool((idx == alignment_layer)),
             to_see = self.to_see if self.no_mask_counter > 1 else 0,
+            history=self.history,
         )
 
             inner_states.append(x)
@@ -816,6 +817,7 @@ class TransformerDecoderLayer(nn.Module):
         need_attn: bool = False,
         need_head_weights: bool = False,
         to_see: int = 0,
+        history = None,
     ):
         """
         Args:
@@ -993,9 +995,9 @@ class TransformerDecoderLayer(nn.Module):
         # We treate multi-step linear combination is a special case of Corrector
         # Next refine the prediction by Corrector
         
-        self.history.add(x)
+        history.add(x)
         # to get the Corrector input 
-        x = self.history.pop()
+        x = history.pop()
             
         residual = x
         if self.normalize_before:
@@ -1027,7 +1029,7 @@ class TransformerDecoderLayer(nn.Module):
         if not self.normalize_before:
             x = self.final_layer_norm(x)
         
-        self.history.update(x)
+        history.update(x)
 
         return x, attn, None
 
