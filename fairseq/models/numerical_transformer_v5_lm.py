@@ -518,7 +518,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
-
+        
+        positions = positions.transpose(0, 1)
         # add emb into history
         if self.history is not None:
             self.history.add(x)
@@ -580,7 +581,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 
                 x, layer_attn, _ = layer(
                 x,
-                positions.transpose(0, 1),
+                positions,
                 encoder_out.encoder_out if encoder_out is not None else None,
                 encoder_out.encoder_padding_mask if encoder_out is not None else None,
                 incremental_state,
@@ -605,6 +606,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                         x = residual + x
                 elif self.calculate_num == 2:
                     x = residual + x
+                else:
+                    assert self.calculate_num ==1
+                    break
             if self.calculate_num == 4:
                 if self.dec_learnable_type == 'ema':
                     if self.layer_wise:
@@ -624,8 +628,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                         x = residual + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
                 else:
                     x = residual + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
-            else:
-                raise ValueError("invalid caculate num！")
 
             # Hence x is a more accurate prediction, than we need to refine
             # We treate multi-step linear combination is a special case of Corrector
@@ -637,7 +639,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 
             x, layer_attn, _ = layer(
                 x,
-                positions.transpose(0, 1),
+                positions,
                 encoder_out.encoder_out if encoder_out is not None else None,
                 encoder_out.encoder_padding_mask if encoder_out is not None else None,
                 incremental_state,
