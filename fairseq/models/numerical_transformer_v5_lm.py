@@ -32,6 +32,7 @@ from fairseq.modules import (
     PositionalEmbedding,
     SinusoidalPositionalEmbedding,
     TransformerDecoderLayer,
+    MultiheadAttention,
 )
 
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
@@ -346,45 +347,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.no_mask_counter = 0
         self.to_see = self.args.max_tokens
 
-
-        self.calculate_num = args.dec_calculate_num
-        self.dec_learnable_type = args.dec_learnable_type
-        self.alpha_type = args.alpha_type
-        self.layer_wise = args.layer_wise
-
-        # create the layer norm for the intermediate approxiamtions of high-order ODE computation
-        # to ensure that each of the representation has been normed
-        # we provide a shared version among different layers
-        self.rk_norm = getattr(args, 'rk_norm', False)
-        self.RK_norm = nn.ModuleList(LayerNorm(embed_dim) for _ in range(self.calculate_num)) if self.rk_norm else None
-        self.residual_norm = nn.ModuleList(LayerNorm(embed_dim) for _ in range(args.decoder_layers)) if self.rk_norm else None
-        if self.calculate_num == 2:
-            if self.dec_learnable_type == 'gated':
-                self.gate_linear = Linear(2 * embed_dim, 1)
-            elif self.dec_learnable_type == 'ema':
-                if self.alpha_type == 'scalar':
-                    if self.layer_wise:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
-                        self.alpha.data.fill_(0.5)
-                    else:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
-                        self.alpha.data.fill_(0.5)
-                elif self.alpha_type == 'vector':
-                    self.alpha = torch.nn.Parameter(torch.Tensor(embed_dim))
-                    self.alpha.data.fill_(0.5)
-        elif self.calculate_num == 4: 
-            if self.dec_learnable_type == 'ema':
-                if self.alpha_type == 'scalar':
-                    if self.layer_wise:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
-                        self.alpha.data.fill_(0.5)
-                    else:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
-                        self.alpha.data.fill_(0.5)
-                elif self.alpha_type == 'vector':
-                    self.alpha = torch.nn.Parameter(torch.Tensor(embed_dim))
-                    self.alpha.data.fill_(0.5)
-
     def build_decoder_layer(self, args, no_encoder_attn=False):
         return TransformerDecoderLayer(args, no_encoder_attn)
 
@@ -569,88 +531,19 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             
 
             x = self.history.pop()
-
-            runge_kutta_list = []
-            if self.rk_norm:
-                residual = self.residual_norm[idx](x)
-            else:
-                residual = x
-
-            # we use the RK2 or RK4 methods as the predictor to generate a rouge prediction
-            for j in range(self.calculate_num):
                 
-                x, layer_attn, _ = layer(
-                x,
-                positions,
-                encoder_out.encoder_out if encoder_out is not None else None,
-                encoder_out.encoder_padding_mask if encoder_out is not None else None,
-                incremental_state,
-                self_attn_mask=self_attn_mask,
-                self_attn_padding_mask=self_attn_padding_mask,
-                need_attn=bool((idx == alignment_layer)),
-                need_head_weights=bool((idx == alignment_layer)),
-                to_see = self.to_see if self.no_mask_counter > 1 else 0,
-            )
-                
-                if self.rk_norm:
-                    x = self.RK_norm[j](x)
-                    runge_kutta_list.append(x)
-                else:
-                    runge_kutta_list.append(x)
-
-                # to construct the order-input for the next step computation
-                if self.calculate_num == 4:
-                    if j == 0 or j == 1:
-                        x = residual + 1 / 2 * x
-                    elif j == 2:
-                        x = residual + x
-                elif self.calculate_num == 2:
-                    x = residual + x
-                else:
-                    assert self.calculate_num ==1
-                    break
-            if self.calculate_num == 4:
-                if self.dec_learnable_type == 'ema':
-                    if self.layer_wise:
-                        x = residual + self.alpha[idx] * torch.pow(1-self.alpha[idx],3) * runge_kutta_list[0] + self.alpha[idx] * torch.pow(1-self.alpha[idx],2) * runge_kutta_list[1] + self.alpha[idx] * (1-self.alpha[idx]) * runge_kutta_list[2] + self.alpha[idx] * runge_kutta_list[3]
-                    else:
-                        x = residual + self.alpha * torch.pow(1-self.alpha,3) * runge_kutta_list[0] + self.alpha * torch.pow(1-self.alpha,2) * runge_kutta_list[1] + self.alpha * (1-self.alpha) * runge_kutta_list[2] + self.alpha * runge_kutta_list[3]
-                else:
-                    x = residual + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
-            elif self.calculate_num == 2:
-                if self.dec_learnable_type == 'gated':
-                    alpha = torch.sigmoid(self.gate_linear(torch.cat((runge_kutta_list[0], runge_kutta_list[1]), dim=-1)))
-                    x = residual + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
-                elif self.dec_learnable_type == 'ema':
-                    if self.layer_wise:
-                        x = residual + self.alpha[idx]*(1-self.alpha[idx]) * runge_kutta_list[0] + self.alpha[idx]*runge_kutta_list[1]
-                    else:    
-                        x = residual + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
-                else:
-                    x = residual + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
-
-            # Hence x is a more accurate prediction, than we need to refine
-            # We treate multi-step linear combination is a special case of Corrector
-            # Next refine the prediction by Corrector
-            
-            # self.history.add(x)
-            # # to get the Corrector input 
-            # x = self.history.pop()
-                
-            # x, layer_attn, _ = layer(
-            #     x,
-            #     positions,
-            #     encoder_out.encoder_out if encoder_out is not None else None,
-            #     encoder_out.encoder_padding_mask if encoder_out is not None else None,
-            #     incremental_state,
-            #     self_attn_mask=self_attn_mask,
-            #     self_attn_padding_mask=self_attn_padding_mask,
-            #     need_attn=bool((idx == alignment_layer)),
-            #     need_head_weights=bool((idx == alignment_layer)),
-            #     to_see = self.to_see if self.no_mask_counter > 1 else 0,
-            # )
-            
-            # self.history.update(x)
+            x, layer_attn, _ = layer(
+            x,
+            positions,
+            encoder_out.encoder_out if encoder_out is not None else None,
+            encoder_out.encoder_padding_mask if encoder_out is not None else None,
+            incremental_state,
+            self_attn_mask=self_attn_mask,
+            self_attn_padding_mask=self_attn_padding_mask,
+            need_attn=bool((idx == alignment_layer)),
+            need_head_weights=bool((idx == alignment_layer)),
+            to_see = self.to_see if self.no_mask_counter > 1 else 0,
+        )
 
             inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:
@@ -759,6 +652,388 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         return state_dict
 
+
+
+class TransformerDecoderLayer(nn.Module):
+    """Decoder layer block.
+
+    In the original paper each operation (multi-head attention, encoder
+    attention or FFN) is postprocessed with: `dropout -> add residual ->
+    layernorm`. In the tensor2tensor code they suggest that learning is more
+    robust when preprocessing each layer with layernorm and postprocessing with:
+    `dropout -> add residual`. We default to the approach in the paper, but the
+    tensor2tensor approach can be enabled by setting
+    *args.decoder_normalize_before* to ``True``.
+
+    Args:
+        args (argparse.Namespace): parsed command-line arguments
+        no_encoder_attn (bool, optional): whether to attend to encoder outputs
+            (default: False).
+    """
+
+    def __init__(
+        self, args, no_encoder_attn=False, add_bias_kv=False, add_zero_attn=False
+    ):
+        super().__init__()
+        self.args = args
+        self.embed_dim = args.decoder_embed_dim
+        self.dropout_module = FairseqDropout(args.dropout, module_name=self.__class__.__name__)
+        self.quant_noise = getattr(args, "quant_noise_pq", 0)
+        self.quant_noise_block_size = getattr(args, "quant_noise_pq_block_size", 8)
+
+        self.cross_self_attention = getattr(args, "cross_self_attention", False)
+
+        self.self_attn = self.build_self_attention(
+            self.embed_dim,
+            args,
+            add_bias_kv=add_bias_kv,
+            add_zero_attn=add_zero_attn,
+        )
+
+        self.activation_fn = utils.get_activation_fn(
+            activation=str(args.activation_fn) if getattr(args, "activation_fn", None) is not None else "relu"
+        )
+        activation_dropout_p = getattr(args, "activation_dropout", 0)
+        if activation_dropout_p == 0:
+            # for backwards compatibility with models that use args.relu_dropout
+            activation_dropout_p = getattr(args, "relu_dropout", 0)
+        self.activation_dropout_module = FairseqDropout(
+            float(activation_dropout_p), module_name=self.__class__.__name__)
+        self.normalize_before = args.decoder_normalize_before
+
+        # use layerNorm rather than FusedLayerNorm for exporting.
+        # char_inputs can be used to determint this.
+        # TODO  remove this once we update apex with the fix
+        export = getattr(args, "char_inputs", False)
+        self.self_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
+
+        if no_encoder_attn:
+            self.encoder_attn = None
+            self.encoder_attn_layer_norm = None
+        else:
+            self.encoder_attn = self.build_encoder_attention(self.embed_dim, args)
+            self.encoder_attn_layer_norm = LayerNorm(self.embed_dim, export=export)
+
+        self.fc1 = self.build_fc1(
+            self.embed_dim, args.decoder_ffn_embed_dim, self.quant_noise, self.quant_noise_block_size
+        )
+        self.fc2 = self.build_fc2(
+            args.decoder_ffn_embed_dim, self.embed_dim, self.quant_noise, self.quant_noise_block_size
+        )
+
+        self.final_layer_norm = LayerNorm(self.embed_dim, export=export)
+        self.need_attn = True
+
+        self.onnx_trace = False
+
+        self.tfp = self.args.tokens_from_prev
+        if self.tfp > 0:
+            self.prev_out = None # This is the cache
+
+        
+        self.calculate_num = args.dec_calculate_num
+        self.dec_learnable_type = args.dec_learnable_type
+        self.alpha_type = args.alpha_type
+        self.layer_wise = args.layer_wise
+
+        # create the layer norm for the intermediate approxiamtions of high-order ODE computation
+        # to ensure that each of the representation has been normed
+        # we provide a shared version among different layers
+        self.rk_norm = getattr(args, 'rk_norm', False)
+        self.RK_norm = nn.ModuleList(LayerNorm(self.embed_dim) for _ in range(self.calculate_num)) if self.rk_norm else None
+        self.residual_norm = nn.ModuleList(LayerNorm(self.embed_dim) for _ in range(args.decoder_layers)) if self.rk_norm else None
+        if self.calculate_num == 2:
+            if self.dec_learnable_type == 'gated':
+                self.gate_linear = Linear(2 * self.embed_dim, 1)
+            elif self.dec_learnable_type == 'ema':
+                if self.alpha_type == 'scalar':
+                    if self.layer_wise:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
+                        self.alpha.data.fill_(0.5)
+                    else:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
+                        self.alpha.data.fill_(0.5)
+                elif self.alpha_type == 'vector':
+                    self.alpha = torch.nn.Parameter(torch.Tensor(self.embed_dim))
+                    self.alpha.data.fill_(0.5)
+        elif self.calculate_num == 4: 
+            if self.dec_learnable_type == 'ema':
+                if self.alpha_type == 'scalar':
+                    if self.layer_wise:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
+                        self.alpha.data.fill_(0.5)
+                    else:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
+                        self.alpha.data.fill_(0.5)
+                elif self.alpha_type == 'vector':
+                    self.alpha = torch.nn.Parameter(torch.Tensor(self.embed_dim))
+                    self.alpha.data.fill_(0.5)
+
+    def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
+        return quant_noise(nn.Linear(input_dim, output_dim), q_noise, qn_block_size)
+
+    def build_fc2(self, input_dim, output_dim, q_noise, qn_block_size):
+        return quant_noise(nn.Linear(input_dim, output_dim), q_noise, qn_block_size)
+
+    def build_self_attention(self, embed_dim, args, add_bias_kv=False, add_zero_attn=False):
+        return MultiheadAttention(
+            embed_dim,
+            args.decoder_attention_heads,
+            dropout=args.attention_dropout,
+            add_bias_kv=add_bias_kv,
+            add_zero_attn=add_zero_attn,
+            #self_attention=not getattr(args, "cross_self_attention", False),
+            q_noise=self.quant_noise,
+            qn_block_size=self.quant_noise_block_size,
+        )
+
+    def build_encoder_attention(self, embed_dim, args):
+        return MultiheadAttention(
+            embed_dim,
+            args.decoder_attention_heads,
+            kdim=getattr(args, "encoder_embed_dim", None),
+            vdim=getattr(args, "encoder_embed_dim", None),
+            dropout=args.attention_dropout,
+            encoder_decoder_attention=True,
+            q_noise=self.quant_noise,
+            qn_block_size=self.quant_noise_block_size,
+        )
+
+    def prepare_for_onnx_export_(self):
+        self.onnx_trace = True
+
+    def forward(
+        self,
+        x,
+        positions,
+        encoder_out: Optional[torch.Tensor] = None,
+        encoder_padding_mask: Optional[torch.Tensor] = None,
+        incremental_state: Optional[Dict[str, Dict[str, Optional[Tensor]]]] = None,
+        prev_self_attn_state: Optional[List[torch.Tensor]] = None,
+        prev_attn_state: Optional[List[torch.Tensor]] = None,
+        self_attn_mask: Optional[torch.Tensor] = None,
+        self_attn_padding_mask: Optional[torch.Tensor] = None,
+        need_attn: bool = False,
+        need_head_weights: bool = False,
+        to_see: int = 0,
+    ):
+        """
+        Args:
+            x (Tensor): input to the layer of shape `(seq_len, batch, embed_dim)`
+            encoder_padding_mask (ByteTensor, optional): binary
+                ByteTensor of shape `(batch, src_len)` where padding
+                elements are indicated by ``1``.
+            need_attn (bool, optional): return attention weights
+            need_head_weights (bool, optional): return attention weights
+                for each head (default: return average over heads).
+
+        Returns:
+            encoded output of shape `(seq_len, batch, embed_dim)`
+        """
+        if need_head_weights:
+            need_attn = True
+
+        if prev_self_attn_state is not None:
+            prev_key, prev_value = prev_self_attn_state[:2]
+            saved_state: Dict[str, Optional[Tensor]] = {
+                "prev_key": prev_key,
+                "prev_value": prev_value,
+            }
+            if len(prev_self_attn_state) >= 3:
+                saved_state["prev_key_padding_mask"] = prev_self_attn_state[2]
+            assert incremental_state is not None
+            self.self_attn._set_input_buffer(incremental_state, saved_state)
+        _self_attn_input_buffer = self.self_attn._get_input_buffer(incremental_state)
+        if self.cross_self_attention and not (
+            incremental_state is not None
+            and _self_attn_input_buffer is not None
+            and "prev_key" in _self_attn_input_buffer
+        ):
+            if self_attn_mask is not None:
+                assert encoder_out is not None
+                self_attn_mask = torch.cat(
+                    (x.new_zeros(x.size(0), encoder_out.size(0)), self_attn_mask), dim=1
+                )
+            if self_attn_padding_mask is not None:
+                if encoder_padding_mask is None:
+                    assert encoder_out is not None
+                    encoder_padding_mask = self_attn_padding_mask.new_zeros(
+                        encoder_out.size(1), encoder_out.size(0)
+                    )
+                self_attn_padding_mask = torch.cat(
+                    (encoder_padding_mask, self_attn_padding_mask), dim=1
+                )
+            assert encoder_out is not None
+            y = torch.cat((encoder_out, x), dim=0)
+        else:
+            y = x
+        if self.tfp > 0:
+            if self.args.sliding_inf == -1:
+                # If we're here it means we're training. The code below just attaches the
+                # existing cache to the input we just received.
+                if self.prev_out is not None:
+                    if y.shape[1] != self.prev_out.shape[1]: # An edge case that only happens sometimes in the last batch of the epoch
+                        self.prev_out = None
+                    else:
+                        from_prev = self.prev_out[-self.tfp:,:,:]
+                        y = torch.cat((from_prev, y))
+                        # If we use a cache, it means we have to update our mask- all the tokens in the cache are
+                        # historical, so all timesteps can look at them.
+                        self_attn_mask = torch.cat((self_attn_mask.new_zeros(x.shape[0], self.tfp), self_attn_mask), dim=1)
+                    self.prev_out = y.detach().clone()
+                else:
+                    self.prev_out = y.detach().clone() # This is the initial subsequence
+
+            else:
+                # This block is only used during token-by-token inference.
+                if y.shape[0] == self.args.max_tokens:
+                    # This is the first batch of inputs we get which we save in the cache.
+                    # After this, all inputs will be of length 1 so we will not reach this line.
+                    self.prev_out = y.detach().clone()
+                elif y.shape[0] == 1:
+                    if y.shape[1] != self.prev_out.shape[1]:
+                        # Weird case that can only happen if batch size is not 1.
+                        print('skipping', y.shape[1], self.prev_out.shape[1])
+                        self.prev_out = y.detach().clone()
+                    else:
+                        from_prev = self.prev_out[-(to_see-1):, :, :]
+                        y = torch.cat((from_prev, y))
+                        self_attn_mask = None # We are doing token by token inference so we don't need an attention mask.
+                        self.prev_out = y.detach().clone()
+
+
+        pos_key = positions[:y.shape[0]]
+
+        if to_see > 0:
+            pos_query = positions[to_see - 1].unsqueeze(0) # This is what we do during (token-by-token) inference.
+        else:
+            pos_query = positions[y.shape[0]-x.shape[0]:y.shape[0]] # This is what we do during training.
+                                                                    # If our subsequence length is 3, that means
+                                                                    # that the cache will always get positional embeddings [1,2,3] and so
+                                                                    # the current subsequence gets positional embeddings [4,5,6], both
+                                                                    # in the query and in the key.
+                                                                    # They keys/values are composed of both the current subsequence and the previous one
+                                                                    # while the query is composed just of the vectors of the current subsequence.
+                                                                    # In the next iteration, words 4,5,6 get moved into the cache and get positional embeddings 1,2,3
+                                                                    # and the new words get positional embeddings 4,5,6, and then the process is repeated.
+
+        runge_kutta_list = []
+        if self.rk_norm:
+            x = self.RK_norm[j](x)
+            runge_kutta_list.append(x)
+        else:
+            runge_kutta_list.append(x)
+
+        for j in range(self.calculate_num):
+                
+            #ode function here
+            
+            residual = x
+            if self.normalize_before:
+                x = self.self_attn_layer_norm(x)
+
+            x, attn = self.self_attn(
+                query=x + pos_query,
+                key=y + pos_key,
+                value=y,
+                key_padding_mask=self_attn_padding_mask,
+                incremental_state=incremental_state,
+                need_weights=False,
+                attn_mask=self_attn_mask,
+            )
+            x = self.dropout_module(x)
+            x = residual + x
+            if not self.normalize_before:
+                x = self.self_attn_layer_norm(x)
+
+            residual = x
+            if self.normalize_before:
+                x = self.final_layer_norm(x)
+
+            x = self.activation_fn(self.fc1(x))
+            x = self.activation_dropout_module(x)
+            x = self.fc2(x)
+            x = self.dropout_module(x)
+            x = residual + x
+            if not self.normalize_before:
+                x = self.final_layer_norm(x)
+
+            if self.rk_norm:
+                x = self.RK_norm[j](x)
+                runge_kutta_list.append(x)
+            else:
+                runge_kutta_list.append(x)
+
+            # to construct the order-input for the next step computation
+            if self.calculate_num == 4:
+                if j == 0 or j == 1:
+                    x = residual + 1 / 2 * x
+                elif j == 2:
+                    x = residual + x
+            elif self.calculate_num == 2:
+                x = residual + x
+            else:
+                assert self.calculate_num ==1
+                break
+        if self.calculate_num == 4:
+            if self.dec_learnable_type == 'ema':
+                x = residual + self.alpha * torch.pow(1-self.alpha,3) * runge_kutta_list[0] + self.alpha * torch.pow(1-self.alpha,2) * runge_kutta_list[1] + self.alpha * (1-self.alpha) * runge_kutta_list[2] + self.alpha * runge_kutta_list[3]
+            else:
+                x = residual + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
+        elif self.calculate_num == 2:
+            if self.dec_learnable_type == 'gated':
+                alpha = torch.sigmoid(self.gate_linear(torch.cat((runge_kutta_list[0], runge_kutta_list[1]), dim=-1)))
+                x = residual + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
+            elif self.dec_learnable_type == 'ema':
+                x = residual + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
+            else:
+                x = residual + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
+
+        # Hence x is a more accurate prediction, than we need to refine
+        # We treate multi-step linear combination is a special case of Corrector
+        # Next refine the prediction by Corrector
+        
+        self.history.add(x)
+        # to get the Corrector input 
+        x = self.history.pop()
+            
+        residual = x
+        if self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+
+        x, attn = self.self_attn(
+            query=x + pos_query,
+            key=y + pos_key,
+            value=y,
+            key_padding_mask=self_attn_padding_mask,
+            incremental_state=incremental_state,
+            need_weights=False,
+            attn_mask=self_attn_mask,
+        )
+        x = self.dropout_module(x)
+        x = residual + x
+        if not self.normalize_before:
+            x = self.self_attn_layer_norm(x)
+
+        residual = x
+        if self.normalize_before:
+            x = self.final_layer_norm(x)
+
+        x = self.activation_fn(self.fc1(x))
+        x = self.activation_dropout_module(x)
+        x = self.fc2(x)
+        x = self.dropout_module(x)
+        x = residual + x
+        if not self.normalize_before:
+            x = self.final_layer_norm(x)
+        
+        self.history.update(x)
+
+        return x, attn, None
+
+
+    def make_generation_fast_(self, need_attn: bool = False, **kwargs):
+        self.need_attn = need_attn
 
 def Embedding(num_embeddings, embedding_dim, padding_idx):
     m = nn.Embedding(num_embeddings, embedding_dim, padding_idx=padding_idx)
