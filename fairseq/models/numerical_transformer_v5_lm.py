@@ -3,46 +3,45 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from dataclasses import dataclass, field
-from typing import Optional
 from typing import Any, Dict, List, Optional, Tuple
-
 import torch
 import torch.nn as nn
-from torch import Tensor
 import math
+
 from fairseq import options, utils
 from fairseq.models import (
     FairseqLanguageModel,
+    FairseqIncrementalDecoder,
     register_model,
     register_model_architecture,
-    FairseqIncrementalDecoder
 )
 from fairseq.models.transformer import (
     Embedding,
     TransformerDecoder,
 )
+
+from fairseq.models.fairseq_encoder import EncoderOut
+
 from fairseq.modules import (
-    AdaptiveInput,
-    CharacterTokenEmbedder,
-    SinusoidalPositionalEmbedding,
-    TransformerDecoderLayer,
     AdaptiveSoftmax,
     FairseqDropout,
+    AdaptiveInput,
+    CharacterTokenEmbedder,
     LayerDropModuleList,
     LayerNorm,
     PositionalEmbedding,
-    MultiheadAttention,
+    SinusoidalPositionalEmbedding,
+    TransformerDecoderLayer,
 )
-from omegaconf import II
 
-from fairseq.models.fairseq_encoder import EncoderOut
-DEFAULT_MAX_TARGET_POSITIONS = 1024
 from fairseq.modules.quant_noise import quant_noise as apply_quant_noise_
 from fairseq.modules.quant_noise import quant_noise
 from fairseq.modules.layer_history import CreateLayerHistory
+from torch import Tensor
 
 from fairseq.modules.drop_path import DropPath
+DEFAULT_MAX_TARGET_POSITIONS = 1024
+
 
 @register_model('numerical_transformer_v5_lm')
 class NumericalTransformerV5LanguageModel(FairseqLanguageModel):
@@ -58,11 +57,11 @@ class NumericalTransformerV5LanguageModel(FairseqLanguageModel):
             }
 
         return {
-            'numerical_transformer_v5_lm.gbw.adaptive_huge': 'https://dl.fbaipublicfiles.com/fairseq/models/lm/adaptive_lm_gbw_huge.tar.bz2',
-            'numerical_transformer_v5_lm.wiki103.adaptive': 'https://dl.fbaipublicfiles.com/fairseq/models/lm/adaptive_lm_wiki103.v2.tar.bz2',
-            'numerical_transformer_v5_lm.wmt19.en': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/lm/wmt19.en.tar.bz2'),
-            'numerical_transformer_v5_lm.wmt19.de': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/lm/wmt19.de.tar.bz2'),
-            'numerical_transformer_v5_lm.wmt19.ru': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/lm/wmt19.ru.tar.bz2'),
+            'transformer_lm.gbw.adaptive_huge': 'https://dl.fbaipublicfiles.com/fairseq/models/lm/adaptive_lm_gbw_huge.tar.bz2',
+            'transformer_lm.wiki103.adaptive': 'https://dl.fbaipublicfiles.com/fairseq/models/lm/adaptive_lm_wiki103.v2.tar.bz2',
+            'transformer_lm.wmt19.en': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/lm/wmt19.en.tar.bz2'),
+            'transformer_lm.wmt19.de': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/lm/wmt19.de.tar.bz2'),
+            'transformer_lm.wmt19.ru': moses_fastbpe('https://dl.fbaipublicfiles.com/fairseq/models/lm/wmt19.ru.tar.bz2'),
         }
 
     def __init__(self, decoder):
@@ -289,7 +288,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layernorm_embedding = None
 
         self.cross_self_attention = getattr(args, "cross_self_attention", False)
-
         # create decoder layer history
         self.history = CreateLayerHistory(args, is_encoder=False)
 
@@ -350,9 +348,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
 
         self.calculate_num = args.dec_calculate_num
-        self.enc_learnable_type = getattr(args, 'dec_learnable_type', 'ema')
-        self.alpha_type = getattr(args, 'alpha_type', 'scalar')
-        self.layer_wise = getattr(args, 'layer_wise', False)
+        self.dec_learnable_type = args.dec_learnable_type
+        self.alpha_type = args.alpha_type
+        self.layer_wise = args.layer_wise
 
         # create the layer norm for the intermediate approxiamtions of high-order ODE computation
         # to ensure that each of the representation has been normed
@@ -361,9 +359,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         self.RK_norm = nn.ModuleList(LayerNorm(embed_dim) for _ in range(self.calculate_num)) if self.rk_norm else None
         self.residual_norm = nn.ModuleList(LayerNorm(embed_dim) for _ in range(args.decoder_layers)) if self.rk_norm else None
         if self.calculate_num == 2:
-            if self.enc_learnable_type == 'gated':
+            if self.dec_learnable_type == 'gated':
                 self.gate_linear = Linear(2 * embed_dim, 1)
-            elif self.enc_learnable_type == 'ema':
+            elif self.dec_learnable_type == 'ema':
                 if self.alpha_type == 'scalar':
                     if self.layer_wise:
                         self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
@@ -375,7 +373,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                     self.alpha = torch.nn.Parameter(torch.Tensor(embed_dim))
                     self.alpha.data.fill_(0.5)
         elif self.calculate_num == 4: 
-            if self.enc_learnable_type == 'ema':
+            if self.dec_learnable_type == 'ema':
                 if self.alpha_type == 'scalar':
                     if self.layer_wise:
                         self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
@@ -521,7 +519,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
 
-        self.history.add(x)
+        # add emb into history
+        if self.history is not None:
+            self.history.add(x)
 
         self_attn_padding_mask: Optional[Tensor] = None
         if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
@@ -565,6 +565,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 self_attn_mask = self.buffered_future_mask(x)
             else:
                 self_attn_mask = None
+            
 
             x = self.history.pop()
 
@@ -574,8 +575,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             else:
                 residual = x
 
+            # we use the RK2 or RK4 methods as the predictor to generate a rouge prediction
             for j in range(self.calculate_num):
-                
                 
                 x, layer_attn, _ = layer(
                 x,
@@ -605,7 +606,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 elif self.calculate_num == 2:
                     x = residual + x
             if self.calculate_num == 4:
-                if self.enc_learnable_type == 'ema':
+                if self.dec_learnable_type == 'ema':
                     if self.layer_wise:
                         x = residual + self.alpha[idx] * torch.pow(1-self.alpha[idx],3) * runge_kutta_list[0] + self.alpha[idx] * torch.pow(1-self.alpha[idx],2) * runge_kutta_list[1] + self.alpha[idx] * (1-self.alpha[idx]) * runge_kutta_list[2] + self.alpha[idx] * runge_kutta_list[3]
                     else:
@@ -613,10 +614,10 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 else:
                     x = residual + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
             elif self.calculate_num == 2:
-                if self.enc_learnable_type == 'gated':
+                if self.dec_learnable_type == 'gated':
                     alpha = torch.sigmoid(self.gate_linear(torch.cat((runge_kutta_list[0], runge_kutta_list[1]), dim=-1)))
                     x = residual + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
-                elif self.enc_learnable_type == 'ema':
+                elif self.dec_learnable_type == 'ema':
                     if self.layer_wise:
                         x = residual + self.alpha[idx]*(1-self.alpha[idx]) * runge_kutta_list[0] + self.alpha[idx]*runge_kutta_list[1]
                     else:    
@@ -625,7 +626,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                     x = residual + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
             else:
                 raise ValueError("invalid caculate num！")
-            inner_states.append(x)
 
             # Hence x is a more accurate prediction, than we need to refine
             # We treate multi-step linear combination is a special case of Corrector
@@ -650,6 +650,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             
             self.history.update(x)
 
+            inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:
                 attn = layer_attn.float().to(x)
 
@@ -771,6 +772,7 @@ def Linear(in_features, out_features, bias=True):
         nn.init.constant_(m.bias, 0.0)
     return m
 
+
 @register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm')
 def base_lm_architecture(args):
     # backward compatibility for older model checkpoints
@@ -824,8 +826,8 @@ def base_lm_architecture(args):
     args.no_scale_embedding = getattr(args, 'no_scale_embedding', False)
     args.layernorm_embedding = getattr(args, 'layernorm_embedding', False)
 
-    args.max_relative_length = getattr(args, 'max_relative_length', -1)
-    args.k_only = getattr(args, 'k_only', True)
+    args.max_relative_length = getattr(args, 'max_relative_length', args.max_relative_length)
+    args.k_only = getattr(args, 'k_only', args.k_only)
 
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'rk_predicotor_multistep_corrector')
     args.decoder_integration_type = getattr(args, 'decoder_integration_type', 'avg')
@@ -836,7 +838,7 @@ def base_lm_architecture(args):
     args.layer_wise = getattr(args, 'layer_wise', False)
     args.rk_norm = getattr(args, 'rk_norm', False)
 
-    args.drop_path = getattr(args, 'drop_path', 0.1)
+    args.drop_path = getattr(args, 'drop_path', 0)
 
 
 @register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_big')
@@ -851,7 +853,7 @@ def numerical_transformer_v5_lm_big(args):
 @register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_wiki103')
 @register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_baevski_wiki103')
 def numerical_transformer_v5_lm_baevski_wiki103(args):
-    args.decoder_layers = getattr(args, 'decoder_layers', 8)
+    args.decoder_layers = getattr(args, 'decoder_layers', 16)
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
     args.dropout = getattr(args, 'dropout', 0.3)
     args.adaptive_input = getattr(args, 'adaptive_input', True)
@@ -863,6 +865,7 @@ def numerical_transformer_v5_lm_baevski_wiki103(args):
     args.activation_dropout = getattr(args, 'activation_dropout', 0.1)
     args.no_decoder_final_norm = getattr(args, 'no_decoder_final_norm', True)
     args.tie_adaptive_proj = getattr(args, 'tie_adaptive_proj', True)
+    args.decoder_history_type = getattr(args, 'decoder_history_type', 'rk_predicotor_multistep_corrector')
     numerical_transformer_v5_lm_big(args)
 
 
