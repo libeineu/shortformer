@@ -633,24 +633,24 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             # We treate multi-step linear combination is a special case of Corrector
             # Next refine the prediction by Corrector
             
-            self.history.add(x)
-            # to get the Corrector input 
-            x = self.history.pop()
+            # self.history.add(x)
+            # # to get the Corrector input 
+            # x = self.history.pop()
                 
-            x, layer_attn, _ = layer(
-                x,
-                positions,
-                encoder_out.encoder_out if encoder_out is not None else None,
-                encoder_out.encoder_padding_mask if encoder_out is not None else None,
-                incremental_state,
-                self_attn_mask=self_attn_mask,
-                self_attn_padding_mask=self_attn_padding_mask,
-                need_attn=bool((idx == alignment_layer)),
-                need_head_weights=bool((idx == alignment_layer)),
-                to_see = self.to_see if self.no_mask_counter > 1 else 0,
-            )
+            # x, layer_attn, _ = layer(
+            #     x,
+            #     positions,
+            #     encoder_out.encoder_out if encoder_out is not None else None,
+            #     encoder_out.encoder_padding_mask if encoder_out is not None else None,
+            #     incremental_state,
+            #     self_attn_mask=self_attn_mask,
+            #     self_attn_padding_mask=self_attn_padding_mask,
+            #     need_attn=bool((idx == alignment_layer)),
+            #     need_head_weights=bool((idx == alignment_layer)),
+            #     to_see = self.to_see if self.no_mask_counter > 1 else 0,
+            # )
             
-            self.history.update(x)
+            # self.history.update(x)
 
             inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:
