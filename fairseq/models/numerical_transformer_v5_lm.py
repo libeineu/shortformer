@@ -742,7 +742,7 @@ class TransformerDecoderLayer(nn.Module):
         # we provide a shared version among different layers
         self.rk_norm = getattr(args, 'rk_norm', False)
         self.RK_norm = nn.ModuleList(LayerNorm(self.embed_dim) for _ in range(self.calculate_num)) if self.rk_norm else None
-        self.residual_norm = nn.ModuleList(LayerNorm(self.embed_dim) for _ in range(args.decoder_layers)) if self.rk_norm else None
+        self.residual_norm = LayerNorm(self.embed_dim) if self.rk_norm else None
         if self.calculate_num == 2:
             if self.dec_learnable_type == 'gated':
                 self.gate_linear = Linear(2 * self.embed_dim, 1)
@@ -921,10 +921,9 @@ class TransformerDecoderLayer(nn.Module):
 
         runge_kutta_list = []
         if self.rk_norm:
-            x = self.RK_norm[j](x)
-            runge_kutta_list.append(x)
+            residual_layer = self.residual_norm(x)
         else:
-            runge_kutta_list.append(x)
+            residual_layer = x
 
         for j in range(self.calculate_num):
                 
@@ -969,27 +968,27 @@ class TransformerDecoderLayer(nn.Module):
             # to construct the order-input for the next step computation
             if self.calculate_num == 4:
                 if j == 0 or j == 1:
-                    x = residual + 1 / 2 * x
+                    x = residual_layer + 1 / 2 * x
                 elif j == 2:
-                    x = residual + x
+                    x = residual_layer + x
             elif self.calculate_num == 2:
-                x = residual + x
+                x = residual_layer + x
             else:
                 assert self.calculate_num ==1
                 break
         if self.calculate_num == 4:
             if self.dec_learnable_type == 'ema':
-                x = residual + self.alpha * torch.pow(1-self.alpha,3) * runge_kutta_list[0] + self.alpha * torch.pow(1-self.alpha,2) * runge_kutta_list[1] + self.alpha * (1-self.alpha) * runge_kutta_list[2] + self.alpha * runge_kutta_list[3]
+                x = residual_layer + self.alpha * torch.pow(1-self.alpha,3) * runge_kutta_list[0] + self.alpha * torch.pow(1-self.alpha,2) * runge_kutta_list[1] + self.alpha * (1-self.alpha) * runge_kutta_list[2] + self.alpha * runge_kutta_list[3]
             else:
-                x = residual + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
+                x = residual_layer + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
         elif self.calculate_num == 2:
             if self.dec_learnable_type == 'gated':
                 alpha = torch.sigmoid(self.gate_linear(torch.cat((runge_kutta_list[0], runge_kutta_list[1]), dim=-1)))
-                x = residual + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
+                x = residual_layer + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
             elif self.dec_learnable_type == 'ema':
-                x = residual + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
+                x = residual_layer + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
             else:
-                x = residual + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
+                x = residual_layer + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
 
         # Hence x is a more accurate prediction, than we need to refine
         # We treate multi-step linear combination is a special case of Corrector
