@@ -44,7 +44,7 @@ from fairseq.modules.drop_path import DropPath
 DEFAULT_MAX_TARGET_POSITIONS = 1024
 
 
-@register_model('numerical_transformer_v5_lm')
+@register_model('numerical_transformer_v2_lm')
 class NumericalTransformerV5LanguageModel(FairseqLanguageModel):
 
     @classmethod
@@ -529,7 +529,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 self_attn_mask = None
             
 
-            x = self.history.pop()
+            # x = self.history.pop()
                 
             x, layer_attn, _ = layer(
             x,
@@ -996,7 +996,7 @@ class TransformerDecoderLayer(nn.Module):
         
         history.add(x)
         # to get the Corrector input 
-        x = history.pop()
+        # x = history.pop()
             
         residual = x
         if self.normalize_before:
@@ -1051,7 +1051,7 @@ def Linear(in_features, out_features, bias=True):
     return m
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm')
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm')
 def base_lm_architecture(args):
     # backward compatibility for older model checkpoints
     if hasattr(args, 'no_tie_adaptive_proj'):
@@ -1119,8 +1119,8 @@ def base_lm_architecture(args):
     args.drop_path = getattr(args, 'drop_path', 0)
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_big')
-def numerical_transformer_v5_lm_big(args):
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_big')
+def numerical_transformer_v2_lm_big(args):
     args.decoder_layers = getattr(args, 'decoder_layers', 12)
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
@@ -1128,9 +1128,9 @@ def numerical_transformer_v5_lm_big(args):
     base_lm_architecture(args)
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_wiki103')
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_baevski_wiki103')
-def numerical_transformer_v5_lm_baevski_wiki103(args):
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_wiki103')
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_baevski_wiki103')
+def numerical_transformer_v2_lm_baevski_wiki103(args):
     args.decoder_layers = getattr(args, 'decoder_layers', 16)
     args.decoder_attention_heads = getattr(args, 'decoder_attention_heads', 8)
     args.dropout = getattr(args, 'dropout', 0.3)
@@ -1144,21 +1144,21 @@ def numerical_transformer_v5_lm_baevski_wiki103(args):
     args.no_decoder_final_norm = getattr(args, 'no_decoder_final_norm', True)
     args.tie_adaptive_proj = getattr(args, 'tie_adaptive_proj', True)
     args.decoder_history_type = getattr(args, 'decoder_history_type', 'rk_predicotor_multistep_corrector')
-    numerical_transformer_v5_lm_big(args)
+    numerical_transformer_v2_lm_big(args)
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_gbw')
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_baevski_gbw')
-def numerical_transformer_v5_lm_baevski_gbw(args):
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_gbw')
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_baevski_gbw')
+def numerical_transformer_v2_lm_baevski_gbw(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 512)
     args.dropout = getattr(args, 'dropout', 0.1)
     args.attention_dropout = getattr(args, 'attention_dropout', 0.1)
     args.no_decoder_final_norm = getattr(args, 'no_decoder_final_norm', True)
-    numerical_transformer_v5_lm_big(args)
+    numerical_transformer_v2_lm_big(args)
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_gpt')
-def numerical_transformer_v5_lm_gpt(args):
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_gpt')
+def numerical_transformer_v2_lm_gpt(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 768)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 3072)
     args.decoder_layers = getattr(args, 'decoder_layers', 12)
@@ -1169,8 +1169,8 @@ def numerical_transformer_v5_lm_gpt(args):
     base_lm_architecture(args)
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_gpt2_small')
-def numerical_transformer_v5_lm_gpt2_small(args):
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_gpt2_small')
+def numerical_transformer_v2_lm_gpt2_small(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1024)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 4096)
     args.decoder_layers = getattr(args, 'decoder_layers', 24)
@@ -1181,8 +1181,8 @@ def numerical_transformer_v5_lm_gpt2_small(args):
     base_lm_architecture(args)
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_gpt2_medium')
-def numerical_transformer_v5_lm_gpt2_medium(args):
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_gpt2_medium')
+def numerical_transformer_v2_lm_gpt2_medium(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1280)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 5120)
     args.decoder_layers = getattr(args, 'decoder_layers', 36)
@@ -1193,8 +1193,8 @@ def numerical_transformer_v5_lm_gpt2_medium(args):
     base_lm_architecture(args)
 
 
-@register_model_architecture('numerical_transformer_v5_lm', 'numerical_transformer_v5_lm_gpt2_big')
-def numerical_transformer_v5_lm_gpt2_big(args):
+@register_model_architecture('numerical_transformer_v2_lm', 'numerical_transformer_v2_lm_gpt2_big')
+def numerical_transformer_v2_lm_gpt2_big(args):
     args.decoder_embed_dim = getattr(args, 'decoder_embed_dim', 1600)
     args.decoder_ffn_embed_dim = getattr(args, 'decoder_ffn_embed_dim', 6400)
     args.decoder_layers = getattr(args, 'decoder_layers', 48)
