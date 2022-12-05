@@ -17,7 +17,6 @@ from fairseq.models import (
 )
 from fairseq.models.transformer import (
     Embedding,
-    TransformerDecoder,
 )
 
 from fairseq.models.fairseq_encoder import EncoderOut
@@ -31,7 +30,6 @@ from fairseq.modules import (
     LayerNorm,
     PositionalEmbedding,
     SinusoidalPositionalEmbedding,
-    TransformerDecoderLayer,
     MultiheadAttention,
 )
 
@@ -289,8 +287,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layernorm_embedding = None
 
         self.cross_self_attention = getattr(args, "cross_self_attention", False)
-        # create decoder layer history
-        self.history = CreateLayerHistory(args, is_encoder=False)
 
         if self.decoder_layerdrop > 0.0:
             self.layers = LayerDropModuleList(p=self.decoder_layerdrop)
@@ -346,6 +342,47 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         self.no_mask_counter = 0
         self.to_see = self.args.max_tokens
+
+        # create decoder layer history
+        self.history = CreateLayerHistory(args, is_encoder=False)
+
+        self.calculate_num = args.dec_calculate_num
+        self.dec_learnable_type = args.dec_learnable_type
+        self.alpha_type = args.alpha_type
+        self.layer_wise = args.layer_wise
+
+        # create the layer norm for the intermediate approxiamtions of high-order ODE computation
+        # to ensure that each of the representation has been normed
+        # we provide a shared version among different layers
+        self.rk_norm = getattr(args, 'rk_norm', False)
+        self.RK_norm = nn.ModuleList(LayerNorm(self.embed_dim) for _ in range(self.calculate_num)) if self.rk_norm else None
+        self.residual_norm = nn.ModuleList(LayerNorm(embed_dim) for _ in range(args.decoder_layers)) if self.rk_norm else None
+        if self.calculate_num == 2:
+            if self.dec_learnable_type == 'gated':
+                self.gate_linear = Linear(2 * self.embed_dim, 1)
+            elif self.dec_learnable_type == 'ema':
+                if self.alpha_type == 'scalar':
+                    if self.layer_wise:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
+                        self.alpha.data.fill_(0.5)
+                    else:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
+                        self.alpha.data.fill_(0.5)
+                elif self.alpha_type == 'vector':
+                    self.alpha = torch.nn.Parameter(torch.Tensor(self.embed_dim))
+                    self.alpha.data.fill_(0.5)
+        elif self.calculate_num == 4: 
+            if self.dec_learnable_type == 'ema':
+                if self.alpha_type == 'scalar':
+                    if self.layer_wise:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
+                        self.alpha.data.fill_(0.5)
+                    else:
+                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
+                        self.alpha.data.fill_(0.5)
+                elif self.alpha_type == 'vector':
+                    self.alpha = torch.nn.Parameter(torch.Tensor(self.embed_dim))
+                    self.alpha.data.fill_(0.5)
 
     def build_decoder_layer(self, args, no_encoder_attn=False):
         return TransformerDecoderLayer(args, no_encoder_attn)
@@ -440,10 +477,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 - the decoder's features of shape `(batch, tgt_len, embed_dim)`
                 - a dictionary with any model-specific outputs
         """
-
-        if self.history is not None:
-            self.history.clean()
-
         if alignment_layer is None:
             alignment_layer = self.num_layers - 1
 
@@ -480,10 +513,9 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
-        
+
         # add emb into history
-        if self.history is not None:
-            self.history.add(x)
+        self.history.add(x)
 
         self_attn_padding_mask: Optional[Tensor] = None
         if self.cross_self_attention or prev_output_tokens.eq(self.padding_idx).any():
@@ -527,23 +559,87 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 self_attn_mask = self.buffered_future_mask(x)
             else:
                 self_attn_mask = None
-            
 
-            # x = self.history.pop()
+            x = self.history.pop()
+            
+            runge_kutta_list = []
+            if self.rk_norm:
+                residual = self.residual_norm[idx](x)
+            else:
+                residual = x
+
+
+            # we use the RK2 or RK4 methods as the predictor to generate a rouge prediction
+            for j in range(self.calculate_num):
+
+                x, layer_attn, _ = layer(
+                x,
+                positions.transpose(0, 1),
+                encoder_out.encoder_out if encoder_out is not None else None,
+                encoder_out.encoder_padding_mask if encoder_out is not None else None,
+                incremental_state,
+                self_attn_mask=self_attn_mask,
+                self_attn_padding_mask=self_attn_padding_mask,
+                need_attn=bool((idx == alignment_layer)),
+                need_head_weights=bool((idx == alignment_layer)),
+                to_see = self.to_see if self.no_mask_counter > 1 else 0,
+                is_cache = j,
+            )
+                if self.rk_norm:
+                    x = self.RK_norm[j](x)
+                    runge_kutta_list.append(x)
+                else:
+                    runge_kutta_list.append(x)
+
+                # to construct the order-input for the next step computation
+                if self.calculate_num == 4:
+                    if j == 0 or j == 1:
+                        x = residual + 1 / 2 * x
+                    elif j == 2:
+                        x = residual + x
+                elif self.calculate_num == 2:
+                    x = residual + x
+            if self.calculate_num == 4:
+                if self.enc_learnable_type == 'ema':
+                    x = residual + self.alpha * torch.pow(1-self.alpha,3) * runge_kutta_list[0] + self.alpha * torch.pow(1-self.alpha,2) * runge_kutta_list[1] + self.alpha * (1-self.alpha) * runge_kutta_list[2] + self.alpha * runge_kutta_list[3]
+                else:
+                    x = residual + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
+            elif self.calculate_num == 2:
+                if self.enc_learnable_type == 'gated':
+                    alpha = torch.sigmoid(self.gate_linear(torch.cat((runge_kutta_list[0], runge_kutta_list[1]), dim=-1)))
+                    x = residual + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
+                elif self.enc_learnable_type == 'ema':
+                    x = residual + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
+                else:
+                    x = residual + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
+            else:
+                raise ValueError("invalid caculate num！")
+
+            
+            # Hence x is a more accurate prediction, than we need to refine
+            # We treate multi-step linear combination is a special case of Corrector
+            # Next refine the prediction by Corrector
+            
+            self.history.add(x)
+            # to get the Corrector input 
+            x = self.history.pop()
                 
             x, layer_attn, _ = layer(
-            x,
-            positions.transpose(0, 1),
-            encoder_out.encoder_out if encoder_out is not None else None,
-            encoder_out.encoder_padding_mask if encoder_out is not None else None,
-            incremental_state,
-            self_attn_mask=self_attn_mask,
-            self_attn_padding_mask=self_attn_padding_mask,
-            need_attn=bool((idx == alignment_layer)),
-            need_head_weights=bool((idx == alignment_layer)),
-            to_see = self.to_see if self.no_mask_counter > 1 else 0,
-            history=self.history,
-        )
+                x,
+                positions.transpose(0, 1),
+                encoder_out.encoder_out if encoder_out is not None else None,
+                encoder_out.encoder_padding_mask if encoder_out is not None else None,
+                incremental_state,
+                self_attn_mask=self_attn_mask,
+                self_attn_padding_mask=self_attn_padding_mask,
+                need_attn=bool((idx == alignment_layer)),
+                need_head_weights=bool((idx == alignment_layer)),
+                to_see = self.to_see if self.no_mask_counter > 1 else 0,
+                is_cache = 1,
+            )
+            
+            self.history.update(x)
+
 
             inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:
@@ -556,7 +652,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             # average probabilities over heads
             attn = attn.mean(dim=0)
 
-        x = self.history.pop()
+        if self.history is not None:
+            x = self.history.pop()
 
         if self.layer_norm is not None:
             x = self.layer_norm(x)
@@ -653,7 +750,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         return state_dict
 
 
-
 class TransformerDecoderLayer(nn.Module):
     """Decoder layer block.
 
@@ -730,45 +826,6 @@ class TransformerDecoderLayer(nn.Module):
         if self.tfp > 0:
             self.prev_out = None # This is the cache
 
-        
-        self.calculate_num = args.dec_calculate_num
-        self.dec_learnable_type = args.dec_learnable_type
-        self.alpha_type = args.alpha_type
-        self.layer_wise = args.layer_wise
-
-        # create the layer norm for the intermediate approxiamtions of high-order ODE computation
-        # to ensure that each of the representation has been normed
-        # we provide a shared version among different layers
-        self.rk_norm = getattr(args, 'rk_norm', False)
-        self.RK_norm = nn.ModuleList(LayerNorm(self.embed_dim) for _ in range(self.calculate_num)) if self.rk_norm else None
-        self.residual_norm = LayerNorm(self.embed_dim) if self.rk_norm else None
-        if self.calculate_num == 2:
-            if self.dec_learnable_type == 'gated':
-                self.gate_linear = Linear(2 * self.embed_dim, 1)
-            elif self.dec_learnable_type == 'ema':
-                if self.alpha_type == 'scalar':
-                    if self.layer_wise:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
-                        self.alpha.data.fill_(0.5)
-                    else:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
-                        self.alpha.data.fill_(0.5)
-                elif self.alpha_type == 'vector':
-                    self.alpha = torch.nn.Parameter(torch.Tensor(self.embed_dim))
-                    self.alpha.data.fill_(0.5)
-        elif self.calculate_num == 4: 
-            if self.dec_learnable_type == 'ema':
-                if self.alpha_type == 'scalar':
-                    if self.layer_wise:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(args.decoder_layers, 1))
-                        self.alpha.data.fill_(0.5)
-                    else:
-                        self.alpha = torch.nn.Parameter(torch.Tensor(1))
-                        self.alpha.data.fill_(0.5)
-                elif self.alpha_type == 'vector':
-                    self.alpha = torch.nn.Parameter(torch.Tensor(self.embed_dim))
-                    self.alpha.data.fill_(0.5)
-
     def build_fc1(self, input_dim, output_dim, q_noise, qn_block_size):
         return quant_noise(nn.Linear(input_dim, output_dim), q_noise, qn_block_size)
 
@@ -816,7 +873,7 @@ class TransformerDecoderLayer(nn.Module):
         need_attn: bool = False,
         need_head_weights: bool = False,
         to_see: int = 0,
-        history = None,
+        is_cache: int = 10,
     ):
         """
         Args:
@@ -834,6 +891,9 @@ class TransformerDecoderLayer(nn.Module):
         if need_head_weights:
             need_attn = True
 
+        residual = x
+        if self.normalize_before:
+            x = self.self_attn_layer_norm(x)
         if prev_self_attn_state is not None:
             prev_key, prev_value = prev_self_attn_state[:2]
             saved_state: Dict[str, Optional[Tensor]] = {
@@ -868,7 +928,7 @@ class TransformerDecoderLayer(nn.Module):
             y = torch.cat((encoder_out, x), dim=0)
         else:
             y = x
-        if self.tfp > 0:
+        if self.tfp > 0 and is_cache == 0:
             if self.args.sliding_inf == -1:
                 # If we're here it means we're training. The code below just attaches the
                 # existing cache to the input we just received.
@@ -918,90 +978,6 @@ class TransformerDecoderLayer(nn.Module):
                                                                     # In the next iteration, words 4,5,6 get moved into the cache and get positional embeddings 1,2,3
                                                                     # and the new words get positional embeddings 4,5,6, and then the process is repeated.
 
-        runge_kutta_list = []
-        # if self.rk_norm:
-        #     residual_layer = self.residual_norm(x)
-        # else:
-        #     residual_layer = x
-        residual_layer = x
-
-        for j in range(self.calculate_num):
-                
-            #ode function here
-            
-            residual = x
-            if self.normalize_before:
-                x = self.self_attn_layer_norm(x)
-
-            x, attn = self.self_attn(
-                query=x + pos_query,
-                key=y + pos_key,
-                value=y,
-                key_padding_mask=self_attn_padding_mask,
-                incremental_state=incremental_state,
-                need_weights=False,
-                attn_mask=self_attn_mask,
-            )
-            x = self.dropout_module(x)
-            x = residual + x
-            if not self.normalize_before:
-                x = self.self_attn_layer_norm(x)
-
-            residual = x
-            if self.normalize_before:
-                x = self.final_layer_norm(x)
-
-            x = self.activation_fn(self.fc1(x))
-            x = self.activation_dropout_module(x)
-            x = self.fc2(x)
-            x = self.dropout_module(x)
-            x = residual + x
-            if not self.normalize_before:
-                x = self.final_layer_norm(x)
-
-            if self.rk_norm:
-                x = self.RK_norm[j](x)
-                runge_kutta_list.append(x)
-            else:
-                runge_kutta_list.append(x)
-
-            # to construct the order-input for the next step computation
-            if self.calculate_num == 4:
-                if j == 0 or j == 1:
-                    x = residual_layer + 1 / 2 * x
-                elif j == 2:
-                    x = residual_layer + x
-            elif self.calculate_num == 2:
-                x = residual_layer + x
-            else:
-                assert self.calculate_num ==1
-                break
-        if self.calculate_num == 4:
-            if self.dec_learnable_type == 'ema':
-                x = residual_layer + self.alpha * torch.pow(1-self.alpha,3) * runge_kutta_list[0] + self.alpha * torch.pow(1-self.alpha,2) * runge_kutta_list[1] + self.alpha * (1-self.alpha) * runge_kutta_list[2] + self.alpha * runge_kutta_list[3]
-            else:
-                x = residual_layer + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
-        elif self.calculate_num == 2:
-            if self.dec_learnable_type == 'gated':
-                alpha = torch.sigmoid(self.gate_linear(torch.cat((runge_kutta_list[0], runge_kutta_list[1]), dim=-1)))
-                x = residual_layer + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
-            elif self.dec_learnable_type == 'ema':
-                x = residual_layer + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
-            else:
-                x = residual_layer + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
-
-        # Hence x is a more accurate prediction, than we need to refine
-        # We treate multi-step linear combination is a special case of Corrector
-        # Next refine the prediction by Corrector
-        
-        history.add(x)
-        # to get the Corrector input 
-        # x = history.pop()
-            
-        residual = x
-        if self.normalize_before:
-            x = self.self_attn_layer_norm(x)
-
         x, attn = self.self_attn(
             query=x + pos_query,
             key=y + pos_key,
@@ -1016,6 +992,36 @@ class TransformerDecoderLayer(nn.Module):
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
 
+        if self.encoder_attn is not None:
+            residual = x
+            if self.normalize_before:
+                x = self.encoder_attn_layer_norm(x)
+            if prev_attn_state is not None:
+                prev_key, prev_value = prev_attn_state[:2]
+                saved_state: Dict[str, Optional[Tensor]] = {
+                    "prev_key": prev_key,
+                    "prev_value": prev_value,
+                }
+                if len(prev_attn_state) >= 3:
+                    saved_state["prev_key_padding_mask"] = prev_attn_state[2]
+                assert incremental_state is not None
+                self.encoder_attn._set_input_buffer(incremental_state, saved_state)
+
+            x, attn = self.encoder_attn(
+                query=x,
+                key=encoder_out,
+                value=encoder_out,
+                key_padding_mask=encoder_padding_mask,
+                incremental_state=incremental_state,
+                static_kv=True,
+                need_weights=need_attn or (not self.training and self.need_attn),
+                need_head_weights=need_head_weights,
+            )
+            x = self.dropout_module(x)
+            x = residual + x
+            if not self.normalize_before:
+                x = self.encoder_attn_layer_norm(x)
+
         residual = x
         if self.normalize_before:
             x = self.final_layer_norm(x)
@@ -1027,14 +1033,19 @@ class TransformerDecoderLayer(nn.Module):
         x = residual + x
         if not self.normalize_before:
             x = self.final_layer_norm(x)
-        
-        history.update(x)
-
+        if self.onnx_trace and incremental_state is not None:
+            saved_state = self.self_attn._get_input_buffer(incremental_state)
+            assert saved_state is not None
+            if self_attn_padding_mask is not None:
+                self_attn_state = [
+                    saved_state["prev_key"],
+                    saved_state["prev_value"],
+                    saved_state["prev_key_padding_mask"],
+                ]
+            else:
+                self_attn_state = [saved_state["prev_key"], saved_state["prev_value"]]
+            return x, attn, self_attn_state
         return x, attn, None
-
-
-    def make_generation_fast_(self, need_attn: bool = False, **kwargs):
-        self.need_attn = need_attn
 
 def Embedding(num_embeddings, embedding_dim, padding_idx):
     m = nn.Embedding(num_embeddings, embedding_dim, padding_idx=padding_idx)
