@@ -480,7 +480,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
 
         if self.history is not None:
             self.history.clean()
-            
+
         if alignment_layer is None:
             alignment_layer = self.num_layers - 1
 
@@ -604,15 +604,15 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 elif self.calculate_num == 2:
                     x = residual + x
             if self.calculate_num == 4:
-                if self.enc_learnable_type == 'ema':
+                if self.dec_learnable_type == 'ema':
                     x = residual + self.alpha * torch.pow(1-self.alpha,3) * runge_kutta_list[0] + self.alpha * torch.pow(1-self.alpha,2) * runge_kutta_list[1] + self.alpha * (1-self.alpha) * runge_kutta_list[2] + self.alpha * runge_kutta_list[3]
                 else:
                     x = residual + 1 / 6 * (runge_kutta_list[0] + 2 * runge_kutta_list[1] + 2 * runge_kutta_list[2] + runge_kutta_list[3])
             elif self.calculate_num == 2:
-                if self.enc_learnable_type == 'gated':
+                if self.dec_learnable_type == 'gated':
                     alpha = torch.sigmoid(self.gate_linear(torch.cat((runge_kutta_list[0], runge_kutta_list[1]), dim=-1)))
                     x = residual + alpha * runge_kutta_list[0] + (1 - alpha) * runge_kutta_list[1]
-                elif self.enc_learnable_type == 'ema':
+                elif self.dec_learnable_type == 'ema':
                     x = residual + self.alpha*(1-self.alpha) * runge_kutta_list[0] + self.alpha*runge_kutta_list[1]
                 else:
                     x = residual + 1/2 * (runge_kutta_list[0] + runge_kutta_list[1])
