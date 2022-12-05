@@ -481,7 +481,6 @@ class TransformerDecoder(FairseqIncrementalDecoder):
         # B x T x C -> T x B x C
         x = x.transpose(0, 1)
         
-        positions = positions.transpose(0, 1)
         # add emb into history
         if self.history is not None:
             self.history.add(x)
@@ -534,7 +533,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                 
             x, layer_attn, _ = layer(
             x,
-            positions,
+            positions.transpose(0, 1),
             encoder_out.encoder_out if encoder_out is not None else None,
             encoder_out.encoder_padding_mask if encoder_out is not None else None,
             incremental_state,
