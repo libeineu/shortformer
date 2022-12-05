@@ -919,11 +919,10 @@ class TransformerDecoderLayer(nn.Module):
                                                                     # and the new words get positional embeddings 4,5,6, and then the process is repeated.
 
         runge_kutta_list = []
-        # if self.rk_norm:
-        #     residual_layer = self.residual_norm(x)
-        # else:
-        #     residual_layer = x
-        residual_layer = x
+        if self.rk_norm:
+            residual_layer = self.residual_norm(x)
+        else:
+            residual_layer = x
 
         for j in range(self.calculate_num):
                 
@@ -995,40 +994,40 @@ class TransformerDecoderLayer(nn.Module):
         # Next refine the prediction by Corrector
         
         history.add(x)
-        # to get the Corrector input 
-        x = history.pop()
+        # # to get the Corrector input 
+        # x = history.pop()
             
-        residual = x
-        if self.normalize_before:
-            x = self.self_attn_layer_norm(x)
+        # residual = x
+        # if self.normalize_before:
+        #     x = self.self_attn_layer_norm(x)
 
-        x, attn = self.self_attn(
-            query=x + pos_query,
-            key=y + pos_key,
-            value=y,
-            key_padding_mask=self_attn_padding_mask,
-            incremental_state=incremental_state,
-            need_weights=False,
-            attn_mask=self_attn_mask,
-        )
-        x = self.dropout_module(x)
-        x = residual + x
-        if not self.normalize_before:
-            x = self.self_attn_layer_norm(x)
+        # x, attn = self.self_attn(
+        #     query=x + pos_query,
+        #     key=y + pos_key,
+        #     value=y,
+        #     key_padding_mask=self_attn_padding_mask,
+        #     incremental_state=incremental_state,
+        #     need_weights=False,
+        #     attn_mask=self_attn_mask,
+        # )
+        # x = self.dropout_module(x)
+        # x = residual + x
+        # if not self.normalize_before:
+        #     x = self.self_attn_layer_norm(x)
 
-        residual = x
-        if self.normalize_before:
-            x = self.final_layer_norm(x)
+        # residual = x
+        # if self.normalize_before:
+        #     x = self.final_layer_norm(x)
 
-        x = self.activation_fn(self.fc1(x))
-        x = self.activation_dropout_module(x)
-        x = self.fc2(x)
-        x = self.dropout_module(x)
-        x = residual + x
-        if not self.normalize_before:
-            x = self.final_layer_norm(x)
+        # x = self.activation_fn(self.fc1(x))
+        # x = self.activation_dropout_module(x)
+        # x = self.fc2(x)
+        # x = self.dropout_module(x)
+        # x = residual + x
+        # if not self.normalize_before:
+        #     x = self.final_layer_norm(x)
         
-        history.update(x)
+        # history.update(x)
 
         return x, attn, None
 
