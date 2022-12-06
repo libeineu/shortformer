@@ -4,11 +4,11 @@ gpu_num=8
 
 
 data=wiki
-tag=pre_cor_v5_shorformer_Layer8_stage2
-restore_file=pre_cor_v5_shorformer_Layer8_stage1
+tag=RK2_ema_pre_cor_v2_shorformer_Layer8_rknorm_droppath3_stage2
+restore_file=RK2_ema_pre_cor_v2_shorformer_Layer8_rknorm_stage1
 
 if [ $data == "wiki" ]; then
-        arch=numerical_transformer_v5_lm_wiki103
+        arch=numerical_transformer_v2_lm_baevski_wiki103
         max_tokens=2560
         tokens_per_sample=${max_tokens}
         update_freq=1
@@ -42,22 +42,28 @@ else
 fi
 #tag=$arch"_"${max_tokens}"_"${dropout}"_"${lr}
 save_dir="checkpoints/lm/${data}/$tag"
+restore_file="checkpoints/lm/${data}/$restore_file/checkpoint100.pt"
 
 if [ ! -d $save_dir ]; then
         mkdir -p $save_dir
 fi
-cp ./stage1.sh $save_dir/train_lm.sh
+cp ./stage2.sh $save_dir/train_lm.sh
 
 
 if [ $data == "wiki" ]; then
-    cmd="python -u train.py data-bin/wikitext-103
+    cmd="python -m torch.distributed.launch --nproc_per_node=8
+        --nnodes=4 --node_rank=0 --master_addr="172.16.1.117"
+        --master_port=20245
+        train.py data-bin/wikitext-103
         --task language_modeling          
         --save-dir $save_dir
         --restore-file $restore_file     
         --arch $arch
         --decoder-layers 8
         --dec-calculate-num 2
-        --dec-learnable-type ema     
+        --dec-learnable-type ema    
+        --rk-norm	
+	--drop-path 0.3
         --max-update 286000 
         --max-lr 1.0 
         --t-mult 2 
@@ -82,8 +88,7 @@ if [ $data == "wiki" ]; then
         --max-tokens-valid 512 
         --tokens-from-prev 512 
         --curriculum 1000 
-        --required-batch-size-multiple 1 
-        --no-epoch-checkpoints
+        --required-batch-size-multiple 1
         --save-interval 5"
 
 elif [ $data == "ptb" ]; then
@@ -116,15 +121,6 @@ else
         exit
 fi
 
-if [ $fp16 -eq 1 ]; then
-cmd=${cmd}" --fp16 "
-fi
-if [ -n "$max_epoch" ]; then
-cmd=${cmd}" --max-epoch "${max_epoch}
-fi
-if [ -n "$max_update" ]; then
-cmd=${cmd}" --max-update "${max_update}
-fi
 
 export CUDA_VISIBLE_DEVICES=$device
 cmd="nohup "${cmd}" > $save_dir/train.log 2>&1 &"
