@@ -801,6 +801,9 @@ class TransformerDecoderLayer(nn.Module):
             float(activation_dropout_p), module_name=self.__class__.__name__)
         self.normalize_before = args.decoder_normalize_before
 
+        # drop path for further regularization
+        self.drop_path = DropPath(args.drop_path) if args.drop_path > 0. else nn.Identity()
+
         # use layerNorm rather than FusedLayerNorm for exporting.
         # char_inputs can be used to determint this.
         # TODO  remove this once we update apex with the fix
@@ -992,6 +995,7 @@ class TransformerDecoderLayer(nn.Module):
             attn_mask=self_attn_mask,
         )
         x = self.dropout_module(x)
+        x= self.drop_path(x)
         x = residual + x
         if not self.normalize_before:
             x = self.self_attn_layer_norm(x)
@@ -1034,6 +1038,7 @@ class TransformerDecoderLayer(nn.Module):
         x = self.activation_dropout_module(x)
         x = self.fc2(x)
         x = self.dropout_module(x)
+        x= self.drop_path(x)
         x = residual + x
         if not self.normalize_before:
             x = self.final_layer_norm(x)
