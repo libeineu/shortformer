@@ -47,7 +47,7 @@ restore_file="checkpoints/lm/${data}/$restore_file/checkpoint100.pt"
 if [ ! -d $save_dir ]; then
         mkdir -p $save_dir
 fi
-cp ./stage2.sh $save_dir/train_lm.sh
+cp ./ITP_stage2.sh $save_dir/train_lm.sh
 
 
 if [ $data == "wiki" ]; then
